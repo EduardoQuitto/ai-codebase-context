@@ -1,0 +1,17 @@
+[package]
+name = "aicc-context"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Context compiler with budget, dedup and provenance"
+
+[dependencies]
+aicc-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

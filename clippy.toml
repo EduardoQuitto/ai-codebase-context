@@ -1,0 +1,4 @@
+# Clippy config — intentionally minimal for the foundation.
+# Stricter lints are enabled per-workspace in Cargo.toml [workspace.lints].
+msrv = "1.97"
+avoid-breaking-exported-api = false

@@ -1,0 +1,18 @@
+version = 1
+
+[project]
+name = "basic-project"
+
+[index]
+include_docs = true
+include_tests = true
+
+[security]
+exclude_secrets = true
+
+[retrieval]
+semantic = false
+default_limit = 10
+
+[context]
+default_budget = 30000

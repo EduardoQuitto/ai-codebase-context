@@ -1,0 +1,55 @@
+# Rust
+/target/
+# NOTE: Cargo.lock is intentionally versioned (binary workspace).
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs / local debug
+*.log
+*.orig
+*.rej
+
+# App-derived data (never commit indexes, caches or local DBs)
+.aicc-cache/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Test / bench artifacts
+/criterion/
+profdata/
+lcov.info
+coverage/
+
+# Env / secrets (never commit)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+credentials.json
+
+# EXCEPTION: shared test fixtures carry FAKE secrets only (no real
+# credentials). They must stay versioned for Fase 5 classification tests.
+!tests/fixtures/**/.env
+!tests/fixtures/**/.env.*
+!tests/fixtures/**/*.pem
+
+# Temp
+tmp/
+temp/
+*.tmp
+*.bak

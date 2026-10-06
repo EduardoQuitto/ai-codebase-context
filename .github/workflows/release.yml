@@ -1,0 +1,40 @@
+name: Release (skeleton — full automation in Fase 27)
+
+# Foundation: builds + tests the release profile on all target OSes.
+# Fase 27 adds: packaging, SHA-256 checksums, GitHub Release publish,
+# crates.io publish, and ARM64 targets.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Build release
+        run: cargo build --locked --release -p aicc-cli
+        shell: bash
+
+      - name: Smoke test binary
+        run: ./target/release/aicc --help
+        shell: bash
+
+      # Fase 27 TODO:
+      # - archive binary per platform (predictable name)
+      # - SHA256SUMS
+      # - upload artifacts + create GitHub Release
+      # - publish aicc-* crates to crates.io

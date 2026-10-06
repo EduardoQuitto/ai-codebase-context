@@ -1,0 +1,30 @@
+[package]
+name = "aicc-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CLI for local codebase context layer"
+default-run = "aicc"
+
+[[bin]]
+name = "aicc"
+path = "src/main.rs"
+
+[dependencies]
+aicc-core.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+miette.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

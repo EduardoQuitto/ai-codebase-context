@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/scanner",
+    "crates/parser",
+    "crates/graph",
+    "crates/index",
+    "crates/retrieval",
+    "crates/context",
+    "crates/mcp",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+description = "Local-first codebase context layer for coding agents (foundation)"
+keywords = ["ai", "codebase", "context", "cli", "mcp"]
+
+[workspace.dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+# Serialization / config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+toml = { version = "0.8", features = ["parse", "display"] }
+# Errors / diagnostics
+thiserror = { version = "2.0" }
+miette = { version = "7.0", features = ["fancy"] }
+# Observability
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Platform dirs (user cache dir abstraction, Fase 10)
+directories = { version = "6.0" }
+
+# Internal crates
+aicc-core = { path = "crates/core", version = "0.1.0" }
+aicc-scanner = { path = "crates/scanner", version = "0.1.0" }
+aicc-parser = { path = "crates/parser", version = "0.1.0" }
+aicc-graph = { path = "crates/graph", version = "0.1.0" }
+aicc-index = { path = "crates/index", version = "0.1.0" }
+aicc-retrieval = { path = "crates/retrieval", version = "0.1.0" }
+aicc-context = { path = "crates/context", version = "0.1.0" }
+aicc-mcp = { path = "crates/mcp", version = "0.1.0" }
+
+# Dev dependencies shared
+tempfile = { version = "3.10" }
+assert_cmd = { version = "2.0" }
+predicates = { version = "3.1" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = 1 }
+pedantic = { level = "allow", priority = 2 }
