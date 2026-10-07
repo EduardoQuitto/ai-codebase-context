@@ -21,7 +21,7 @@ aicc-core
  ├── security (name/extension conservative classification)
  └── platform (user cache dir → index.sqlite3 path)
          ↓
-aicc-scanner (std-only walker, default ignores, binary/size guards)
+aicc-scanner (ignore-crate walker, .gitignore layers, default ignores, binary/size guards)
 aicc-parser  (extension registry + LanguageParser trait seam)
 aicc-graph   (directed multigraph, typed edges + confidence)
 aicc-index   (schema gate + path resolution; no SQLite yet)
@@ -50,7 +50,7 @@ Key seams already reserved:
 
 | Concern | Now | Later | Decision |
 |---|---|---|---|
-| Traversal + gitignore | std walker | `ignore` crate | ROADMAP §4.7 |
+| Traversal + gitignore | `ignore` crate (Fase 4) | refinements as needed | ROADMAP §4.7 |
 | Parsing | extension registry + trait | Tree-sitter grammars | ADR 0004 |
 | Storage | path + schema gate | SQLite + FTS5, versioned migrations | ADR 0003 |
 | Config | TOML `version=1` | same, migratable | ADR 0005 |

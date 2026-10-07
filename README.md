@@ -37,7 +37,7 @@ cargo build
 
 - No telemetry. No mandatory network. No code execution during analysis.
 - `.env`, keys, certs and similar are excluded from default context and sanitized in logs.
-- See [SECURITY.md](SECURITY.md) and `docs/privacy.md` (planned in full docs pass).
+- See [SECURITY.md](SECURITY.md) for the privacy and disclosure policy.
 
 ## Architecture (summary)
 

@@ -1,0 +1,1 @@
+sibling of an ignored file (expected: included)

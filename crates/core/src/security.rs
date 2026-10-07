@@ -36,6 +36,34 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "woff", "woff2", "ttf", "otf", "eot", "sqlite", "db",
 ];
 
+/// Dependency lockfiles that describe the project without being authored source.
+const GENERATED_FILENAMES: &[&str] = &[
+    "cargo.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "pipfile.lock",
+    "composer.lock",
+    "gemfile.lock",
+    "go.sum",
+];
+
+/// Conservative generated-code heuristic (Fase 4: name-based only).
+///
+/// Matches dependency lockfiles, minified web bundles and explicit
+/// `.generated.` markers. Never reads file contents and never executes
+/// anything; deeper generated-code analysis belongs to later phases.
+#[must_use]
+pub fn is_generated_file_name(path: &Path) -> bool {
+    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    if GENERATED_FILENAMES.contains(&filename.as_str()) {
+        return true;
+    }
+    filename.ends_with(".min.js")
+        || filename.ends_with(".min.css")
+        || filename.contains(".generated.")
+}
 /// Classify by filename/extension. Content sniffing (high-confidence secret
 /// patterns) is a Fase 5 task; this is the safe baseline.
 #[must_use]
@@ -46,18 +74,21 @@ pub fn classify_path(path: &Path) -> Classification {
         return Classification::Sensitive;
     }
 
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        let ext = ext.to_ascii_lowercase();
-        if SENSITIVE_EXTENSIONS.contains(&ext.as_str()) {
-            return Classification::Sensitive;
-        }
-        if BINARY_EXTENSIONS.contains(&ext.as_str()) {
-            return Classification::Binary;
-        }
-        // Lockfiles / generated markers handled as Generated in later phases.
-        if ext == "lock" {
-            return Classification::Generated;
-        }
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+
+    if ext.as_deref().is_some_and(|e| SENSITIVE_EXTENSIONS.contains(&e)) {
+        return Classification::Sensitive;
+    }
+
+    // Generated before binary: derived artifacts are noise even when they
+    // carry a "code-like" extension, and secrets already won above.
+    // Any `*.lock` counts as generated (preserves the previous contract).
+    if ext.as_deref() == Some("lock") || is_generated_file_name(path) {
+        return Classification::Generated;
+    }
+
+    if ext.as_deref().is_some_and(|e| BINARY_EXTENSIONS.contains(&e)) {
+        return Classification::Binary;
     }
 
     // Directories like `target/` are handled by the scanner, not here.
@@ -98,5 +129,23 @@ mod tests {
     #[test]
     fn normal_source_is_allowed() {
         assert_eq!(classify_path(&PathBuf::from("src/main.rs")), Classification::Allowed);
+    }
+
+    #[test]
+    fn generated_names_are_detected() {
+        assert!(is_generated_file_name(&PathBuf::from("package-lock.json")));
+        assert!(is_generated_file_name(&PathBuf::from("Cargo.lock")));
+        assert!(is_generated_file_name(&PathBuf::from("dist/bundle.min.js")));
+        assert!(is_generated_file_name(&PathBuf::from("src/types.generated.ts")));
+        assert!(!is_generated_file_name(&PathBuf::from("src/main.rs")));
+        assert!(!is_generated_file_name(&PathBuf::from(".env")));
+    }
+
+    #[test]
+    fn generated_classification_wins_over_binary_but_not_secrets() {
+        assert_eq!(classify_path(&PathBuf::from("package-lock.json")), Classification::Generated);
+        assert_eq!(classify_path(&PathBuf::from("app.min.js")), Classification::Generated);
+        // Privacy first: a sensitive name is never downgraded to generated.
+        assert_eq!(classify_path(&PathBuf::from(".env.generated")), Classification::Sensitive);
     }
 }

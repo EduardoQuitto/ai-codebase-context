@@ -8,6 +8,7 @@ description = "Secure file discovery and scanning (ignore, binary, size limits)"
 
 [dependencies]
 aicc-core.workspace = true
+ignore.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true

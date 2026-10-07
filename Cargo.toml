@@ -36,6 +36,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # Platform dirs (user cache dir abstraction, Fase 10)
 directories = { version = "6.0" }
 
+# Traversal respecting .gitignore (Fase 4, ROADMAP section 4.7)
+ignore = { version = "0.4" }
+
 # Internal crates
 aicc-core = { path = "crates/core", version = "0.1.0" }
 aicc-scanner = { path = "crates/scanner", version = "0.1.0" }

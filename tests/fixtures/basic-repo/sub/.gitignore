@@ -1,0 +1,2 @@
+# Nested fixture gitignore (proves per-directory layers).
+inner-ignored.txt

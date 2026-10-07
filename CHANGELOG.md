@@ -10,6 +10,10 @@ Before 1.0, `0.x` releases may evolve APIs (config/JSON versioned separately).
 
 ### Added
 
+- Fase 4 secure scanner: `ignore`-crate traversal with `.gitignore` layers,
+  default/extra pruning, binary probe, size limits, docs/tests gates,
+  per-file warnings and typed skip reasons (`ScanReport`).
+
 - Cargo workspace foundation (`core`, `scanner`, `parser`, `graph`, `index`, `retrieval`, `context`, `mcp`, `cli`).
 - CLI contract: `init`, `analyze`, `index`, `search`, `context`, `map`, `status`, `config`, `mcp`, `version` (+ `--json`, `--path`, `--verbose`).
 - Versioned TOML configuration (`.context.toml`, `version = 1`) with safe defaults.

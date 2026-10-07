@@ -1,0 +1,5 @@
+# Fixture .gitignore for Fase 4 scanner tests (safe, fictitious rules).
+*.log
+!keep.log
+/ignored-by-git.txt
+build-git/

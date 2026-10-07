@@ -1,0 +1,1 @@
+This file is ignored by the fixture .gitignore (expected: GitIgnore).
