@@ -32,7 +32,7 @@ pub struct AppConfig {
     pub context: ContextConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectConfig {
     #[serde(default)]
     pub name: Option<String>,
@@ -85,12 +85,6 @@ const fn default_budget() -> usize {
 }
 const fn default_max_file_bytes() -> u64 {
     512 * 1024
-}
-
-impl Default for ProjectConfig {
-    fn default() -> Self {
-        Self { name: None }
-    }
 }
 
 impl Default for IndexConfig {
