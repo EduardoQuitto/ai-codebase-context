@@ -38,6 +38,13 @@ pub struct ScannedEntry {
     pub classification: Classification,
 }
 
+/// A skipped path paired with its exclusion reason (diagnostics only,
+/// never secret contents).
+pub type SkippedEntry = (String, SkipReason);
+
+/// Scanner outcome: included candidates plus the skip list for `--verbose`.
+pub type ScanReport = (Vec<ScannedEntry>, Vec<SkippedEntry>);
+
 /// Options for a scan (subset of `AppConfig::index`).
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
@@ -68,16 +75,13 @@ pub const DEFAULT_IGNORED_DIRS: &[&str] = &[
 
 /// Walk `root` and return included candidates + skip list (for `--verbose`).
 /// Single-threaded foundation; parallelism is a Fase 23 concern.
-pub fn scan(
-    root: &Path,
-    options: &ScanOptions,
-) -> Result<(Vec<ScannedEntry>, Vec<(String, SkipReason)>), ScanError> {
+pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError> {
     if !root.is_dir() {
         return Err(ScanError::Inaccessible(root.display().to_string()));
     }
 
-    let mut included = Vec::new();
-    let mut skipped = Vec::new();
+    let mut included: Vec<ScannedEntry> = Vec::new();
+    let mut skipped: Vec<SkippedEntry> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
 
     while let Some(dir) = stack.pop() {
