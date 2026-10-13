@@ -37,7 +37,17 @@ cargo build
 
 - No telemetry. No mandatory network. No code execution during analysis.
 - `.env`, keys, certs and similar are excluded from default context and sanitized in logs.
+- Fase 5 adds bounded, local-only content inspection for high-confidence
+  secret shapes (PEM markers, selected provider tokens, DB URLs with embedded
+  credentials, credential assignments). Findings exclude the file with a static
+  reason; values never enter reports, logs or JSON. This is a conservative
+  defense-in-depth layer, not a leak-proof guarantee: absence of a finding
+  does not prove a file is secret-free. Set `security.exclude_secrets = false`
+  only if you accept credential-bearing content, and use
+  `security.extra_excludes` for hard path policy.
 - See [SECURITY.md](SECURITY.md) for the privacy and disclosure policy.
+- See [docs/privacy.md](docs/privacy.md) for what is processed locally and the
+  detection limits.
 
 ## Architecture (summary)
 

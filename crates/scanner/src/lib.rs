@@ -1,4 +1,4 @@
-//! `aicc-scanner`: secure file discovery (Fase 4).
+//! `aicc-scanner`: secure file discovery (Fase 5).
 //!
 //! Traversal is built on the [`ignore`](https://docs.rs/ignore) crate:
 //!
@@ -7,23 +7,34 @@
 //!   Deeper `.gitignore` files override shallower ones (git semantics).
 //! - `.ignore` files, global gitignores and `.git/info/exclude` are NOT
 //!   honored: results must not depend on the machine running the scan.
-//! - Hidden files ARE traversed (dotfiles may hold config or docs); secrets
-//!   are still excluded by the security policy before any content is read.
+//! - Hidden files ARE traversed (dotfiles may hold config or docs).
 //! - Symlinks are never followed and their targets are never read.
 //! - The walk is single-threaded and results are sorted: scans are
 //!   deterministic for the same working tree.
+//!
+//! Security (Fase 5) is defense-in-depth, local-only and bounded:
+//! - path-based secrets (`.env`, `*.pem`…) are excluded *before* any content
+//!   is read whenever `exclude_secrets` is enabled;
+//! - remaining candidates are read once, bounded by `max_file_bytes`, and the
+//!   same buffer backs the binary (NUL) check and the high-confidence secret
+//!   detector; oversized files are never read fully;
+//! - `security.extra_excludes` is a hard path policy evaluated before
+//!   `.gitignore` reinclusions and without reading content;
+//! - findings are static reasons only: values, spans and snippets never enter
+//!   reports, warnings, logs or serialized output.
 //!
 //! The scanner never executes repository code and never logs file contents:
 //! diagnostics carry relative paths, sizes and reasons only.
 //!
 //! Exclusion precedence for files (first match wins):
-//! `GitIgnore > ExtraIgnore > Generated > DocsExcluded > TestsExcluded >
-//! Sensitive > TooLarge > Binary`.
-//! Symlinks are rejected before everything (`Symlink`); I/O failures are
-//! reported as warnings and the file is skipped (`Unreadable`) without
-//! aborting the scan. Only default-ignored directories (`DefaultIgnore`) are
-//! pruned during traversal; `extra_ignores` never prunes so nested
-//! `.gitignore` reinclusions keep their documented precedence.
+//! `Symlink > SecurityExclude > GitIgnore > ExtraIgnore > Generated >
+//! DocsExcluded > TestsExcluded > Sensitive > TooLarge > Binary > SecretContent`.
+//! `Sensitive` (path) and `SecretContent` (bounded content inspection) apply
+//! only when `exclude_secrets` is enabled. I/O failures are reported as
+//! warnings and the file is skipped (`Unreadable`) without aborting the scan.
+//! Only default-ignored directories (`DefaultIgnore`) are pruned during
+//! traversal; `extra_ignores` never prunes so nested `.gitignore`
+//! reinclusions keep their documented precedence.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,12 +45,8 @@ use ignore::{DirEntry, WalkBuilder};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use aicc_core::config::IndexConfig;
-use aicc_core::security::{Classification, classify_path, is_generated_file_name};
-
-/// Maximum bytes read from a file for the binary sniffing probe.
-/// Files are never loaded fully just to decide inclusion.
-const SNIFF_BYTES: u64 = 8 * 1024;
+use aicc_core::config::{AppConfig, IndexConfig};
+use aicc_core::security::{Classification, classify_path, contains_secret, is_generated_file_name};
 
 /// Default-ignored directory names (ROADMAP Fase 4; additional directories
 /// can be pruned via `extra_ignores`).
@@ -73,6 +80,11 @@ pub enum ScanError {
     /// Fails fast with the offending pattern instead of silently ignoring it.
     #[error("invalid extra ignore pattern {pattern:?}: {reason}")]
     InvalidIgnorePattern { pattern: String, reason: String },
+
+    /// A `security.extra_excludes` pattern is invalid or uses a denied
+    /// negation (`!`) that would weaken the hard exclusion policy.
+    #[error("invalid security exclude pattern {pattern:?}: {reason}")]
+    InvalidExcludePattern { pattern: String, reason: String },
 }
 
 /// Why a path was excluded from the default context candidates.
@@ -81,6 +93,9 @@ pub enum ScanError {
 pub enum SkipReason {
     /// Pruned product default directory (`node_modules`, `target`, …).
     DefaultIgnore,
+    /// Hard user policy from `security.extra_excludes`. Beats `.gitignore`
+    /// reinclusions; decided without reading content.
+    SecurityExclude,
     /// Matched a `.gitignore` rule (root or nested).
     GitIgnore,
     /// Matched an `extra_ignores` pattern from configuration.
@@ -92,12 +107,17 @@ pub enum SkipReason {
     DocsExcluded,
     /// Test file while `include_tests` is disabled.
     TestsExcluded,
-    /// Potential secret by name or extension. Contents are never read.
+    /// Potential secret by name or extension. Excluded before content is read
+    /// whenever `exclude_secrets` is enabled.
     Sensitive,
-    /// Larger than `max_file_bytes`. Decided from metadata, never by reading.
+    /// Larger than `max_file_bytes`. Decided from metadata (plus a bounded
+    /// growth check at read time), never by reading fully.
     TooLarge,
-    /// Binary by extension or NUL-byte probe.
+    /// Binary by extension or NUL-byte probe over the bounded buffer.
     Binary,
+    /// High-confidence secret pattern in bounded candidate content.
+    /// Static reason only: no pattern name, value or snippet is stored.
+    SecretContent,
     /// A symlink: never followed and never read (symlink policy).
     Symlink,
     /// Could not be examined (metadata/read failure). Always paired with a
@@ -140,7 +160,7 @@ pub struct ScannedEntry {
     pub classification: Classification,
 }
 
-/// Options for a scan (subset of `AppConfig::index`, Fase 3 contract).
+/// Options for a scan (subset of `AppConfig::index` + `AppConfig::security`).
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     /// Files larger than this are skipped (`TooLarge`).
@@ -151,6 +171,15 @@ pub struct ScanOptions {
     pub include_docs: bool,
     /// When false, test paths are skipped (`TestsExcluded`).
     pub include_tests: bool,
+    /// When true (default), path-based secrets are excluded early and bounded
+    /// candidate content is inspected for high-confidence secret patterns.
+    /// When false, automatic secret exclusion is disabled (documented opt-out);
+    /// binary/generated/size/`extra_excludes` policy still applies.
+    pub exclude_secrets: bool,
+    /// Hard path policy from `security.extra_excludes`. Evaluated before
+    /// `.gitignore` reinclusions and without reading content. `!` negations
+    /// are rejected at build time.
+    pub extra_excludes: Vec<String>,
 }
 
 impl Default for ScanOptions {
@@ -160,6 +189,8 @@ impl Default for ScanOptions {
             extra_ignores: Vec::new(),
             include_docs: true,
             include_tests: true,
+            exclude_secrets: true,
+            extra_excludes: Vec::new(),
         }
     }
 }
@@ -175,6 +206,23 @@ impl ScanOptions {
             extra_ignores: cfg.extra_ignores.clone(),
             include_docs: cfg.include_docs,
             include_tests: cfg.include_tests,
+            exclude_secrets: true,
+            extra_excludes: Vec::new(),
+        }
+    }
+
+    /// Build scanner options from the full application configuration,
+    /// wiring both `index` and `security` sections. Prefer this over
+    /// [`ScanOptions::from_index_config`] for real scans.
+    #[must_use]
+    pub fn from_app_config(cfg: &AppConfig) -> Self {
+        Self {
+            max_file_bytes: cfg.index.max_file_bytes,
+            extra_ignores: cfg.index.extra_ignores.clone(),
+            include_docs: cfg.index.include_docs,
+            include_tests: cfg.index.include_tests,
+            exclude_secrets: cfg.security.exclude_secrets,
+            extra_excludes: cfg.security.extra_excludes.clone(),
         }
     }
 }
@@ -183,7 +231,8 @@ impl ScanOptions {
 ///
 /// Returns included candidates plus, for diagnostics, the skip list and any
 /// warnings. A single unreadable file never aborts the scan; only an
-/// unreachable root or an invalid `extra_ignores` pattern is fatal.
+/// unreachable root or an invalid `extra_ignores`/`extra_excludes` pattern is
+/// fatal. Reasons carry static policy facts only, never secret values.
 pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError> {
     if !root.is_dir() {
         return Err(ScanError::Inaccessible(root.display().to_string()));
@@ -194,6 +243,7 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError>
         .map_err(|err| ScanError::Io(format!("could not resolve {}: {err}", root.display())))?;
 
     let extra = build_extra_matcher(&root_abs, &options.extra_ignores)?;
+    let excludes = build_exclude_matcher(&root_abs, &options.extra_excludes)?;
 
     // Directory pruning happens inside the walker: only default-ignored
     // directories are recorded once and never descended into. `extra_ignores`
@@ -261,6 +311,12 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError>
         if entry.file_type().is_some_and(|t| t.is_dir()) {
             continue;
         }
+        // Hard user policy first: `security.extra_excludes` beats `.gitignore`
+        // reinclusions and is decided without reading content.
+        if excludes.matched_path_or_any_parents(entry.path(), false).is_ignore() {
+            skipped.push((rel, SkipReason::SecurityExclude));
+            continue;
+        }
         // Documented precedence: GitIgnore > ExtraIgnore. A nested `.gitignore`
         // whitelist (`!keep.ts`) explicitly re-includes and therefore skips the
         // `ExtraIgnore` check; absence of any git match falls through to it.
@@ -289,16 +345,26 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError>
             skipped.push((rel, SkipReason::TestsExcluded));
             continue;
         }
-        match classify_path(entry.path()) {
-            Classification::Sensitive => {
-                skipped.push((rel, SkipReason::Sensitive));
-                continue;
+        // Early path gate (no content read) when secret exclusion is enabled.
+        if options.exclude_secrets {
+            match classify_path(entry.path()) {
+                Classification::Sensitive => {
+                    skipped.push((rel, SkipReason::Sensitive));
+                    continue;
+                }
+                Classification::Binary => {
+                    skipped.push((rel, SkipReason::Binary));
+                    continue;
+                }
+                Classification::Allowed | Classification::Generated => {}
             }
-            Classification::Binary => {
+        } else {
+            // Opt-out: only the binary *extension* gate still applies early;
+            // path-based `Sensitive` and content inspection are disabled.
+            if matches!(classify_path(entry.path()), Classification::Binary) {
                 skipped.push((rel, SkipReason::Binary));
                 continue;
             }
-            Classification::Allowed | Classification::Generated => {}
         }
         let size = match entry.metadata() {
             Ok(metadata) => metadata.len(),
@@ -315,18 +381,34 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError>
             skipped.push((rel, SkipReason::TooLarge));
             continue;
         }
-        match contains_nul_byte(entry.path()) {
-            Ok(true) => {
-                skipped.push((rel, SkipReason::Binary));
-                continue;
-            }
-            Ok(false) => {}
+        // Single bounded read backs both the binary probe and, for candidates,
+        // the secret detector. `limit+1` exposes growth between metadata and
+        // read so a grown file stays `TooLarge` instead of being read fully.
+        let bounded = match read_bounded(entry.path(), options.max_file_bytes) {
+            Ok(buf) => buf,
             Err(err) => {
                 warnings.push(ScanWarning {
                     rel_path: Some(rel.clone()),
-                    message: format!("could not read file for binary probe: {err}"),
+                    message: format!("could not read file for content inspection: {err}"),
                 });
                 skipped.push((rel, SkipReason::Unreadable));
+                continue;
+            }
+        };
+        if (bounded.len() as u64) > options.max_file_bytes {
+            skipped.push((rel, SkipReason::TooLarge));
+            continue;
+        }
+        if bounded.contains(&0) {
+            skipped.push((rel, SkipReason::Binary));
+            continue;
+        }
+        if options.exclude_secrets {
+            // Lossy text view for detection only; the buffer itself is dropped
+            // after this scope and never stored, logged or serialized.
+            let text = String::from_utf8_lossy(&bounded);
+            if contains_secret(&text) {
+                skipped.push((rel, SkipReason::SecretContent));
                 continue;
             }
         }
@@ -357,6 +439,27 @@ fn build_extra_matcher(root: &Path, patterns: &[String]) -> Result<Gitignore, Sc
         })?;
     }
     builder.build().map_err(|err| ScanError::Io(format!("could not build ignore matcher: {err}")))
+}
+
+/// Compile `security.extra_excludes` as a hard path policy. `!` negations are
+/// rejected: a whitelist must never reopen a hard exclusion.
+fn build_exclude_matcher(root: &Path, patterns: &[String]) -> Result<Gitignore, ScanError> {
+    let mut builder = GitignoreBuilder::new(root);
+    builder.allow_unclosed_class(false);
+    for pattern in patterns {
+        let trimmed = pattern.trim_start();
+        if trimmed.starts_with('!') {
+            return Err(ScanError::InvalidExcludePattern {
+                pattern: pattern.clone(),
+                reason: String::from("negation patterns are not allowed for security excludes"),
+            });
+        }
+        builder.add_line(None, pattern).map_err(|err| ScanError::InvalidExcludePattern {
+            pattern: pattern.clone(),
+            reason: err.to_string(),
+        })?;
+    }
+    builder.build().map_err(|err| ScanError::Io(format!("could not build exclude matcher: {err}")))
 }
 
 /// Stacked `.gitignore` evaluation: the root's file plus one layer per nested
@@ -481,14 +584,19 @@ fn pruned_lock(target: &Mutex<Vec<SkippedEntry>>) -> Vec<SkippedEntry> {
     target.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
 }
 
-/// Bounded NUL-byte probe: reads at most `SNIFF_BYTES` from the start.
-/// Extensionless binaries are caught here; known text stays untouched.
-fn contains_nul_byte(path: &Path) -> Result<bool, std::io::Error> {
+/// Bounded content read for binary + secret inspection: at most
+/// `limit + 1` bytes. The extra byte exposes growth between the metadata
+/// check and the read so oversized files stay `TooLarge`. Never reads
+/// unbounded content; oversized files are never read fully for detection.
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, std::io::Error> {
     use std::io::Read as _;
     let file = std::fs::File::open(path)?;
     let mut buf = Vec::new();
-    file.take(SNIFF_BYTES).read_to_end(&mut buf)?;
-    Ok(buf.contains(&0))
+    // `limit` fits the documented 1_000_000 budget cap; saturating keeps the
+    // `u64 -> u64` arithmetic total without silent truncation on huge configs.
+    let capped = limit.saturating_add(1);
+    file.take(capped).read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 /// Documentation paths by extension, well-known filename or directory.
@@ -854,5 +962,294 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Fase 5: positives (synthetic, clearly fake) ----
+
+    #[test]
+    fn content_private_key_in_common_file_is_excluded() {
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert_eq!(
+            skipped_map(&report).get("notes.txt"),
+            Some(&SkipReason::SecretContent),
+            "PEM marker in notes.txt must exclude: {report:?}"
+        );
+    }
+
+    #[test]
+    fn content_provider_token_is_excluded() {
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert_eq!(
+            skipped_map(&report).get("src/token.ts"),
+            Some(&SkipReason::SecretContent),
+            "ghp_ token must exclude: {report:?}"
+        );
+    }
+
+    #[test]
+    fn content_database_url_is_excluded() {
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert_eq!(
+            skipped_map(&report).get("src/db.ts"),
+            Some(&SkipReason::SecretContent),
+            "postgres URL with creds must exclude: {report:?}"
+        );
+    }
+
+    #[test]
+    fn content_credential_assignment_is_excluded() {
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert_eq!(
+            skipped_map(&report).get("src/config.js"),
+            Some(&SkipReason::SecretContent),
+            "api_key assignment must exclude: {report:?}"
+        );
+    }
+
+    #[test]
+    fn content_secret_after_8k_is_excluded() {
+        // Proves inspection is not limited to the initial binary probe.
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert_eq!(
+            skipped_map(&report).get("large_note.txt"),
+            Some(&SkipReason::SecretContent),
+            "late secret must exclude: {report:?}"
+        );
+    }
+
+    #[test]
+    fn path_env_is_excluded_early() {
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert_eq!(skipped_map(&report).get(".env"), Some(&SkipReason::Sensitive));
+        assert_eq!(skipped_map(&report).get("deploy.pem"), Some(&SkipReason::Sensitive));
+    }
+
+    // ---- Fase 5: negatives (no false positives) ----
+
+    #[test]
+    fn plain_code_is_included() {
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert!(included_set(&report).contains(&"src/main.rs"));
+    }
+
+    #[test]
+    fn suspicious_name_without_secret_value_is_included() {
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert!(
+            included_set(&report).contains(&"src/empty.js"),
+            "empty/short values must not flag: {report:?}"
+        );
+    }
+
+    #[test]
+    fn placeholders_are_included() {
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert!(
+            included_set(&report).contains(&"src/placeholder.js"),
+            "placeholders must not flag: {report:?}"
+        );
+        assert!(
+            included_set(&report).contains(&"docs/example.md"),
+            "illustrative docs must not flag: {report:?}"
+        );
+    }
+
+    #[test]
+    fn public_id_alone_is_included() {
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert!(
+            included_set(&report).contains(&"src/public_id.txt"),
+            "AKIA public id alone must not flag: {report:?}"
+        );
+    }
+
+    #[test]
+    fn binary_and_generated_keep_their_reasons() {
+        let report = scan_fixture("secrets-repo", &ScanOptions::default());
+        let skipped = skipped_map(&report);
+        assert_eq!(skipped.get("assets/logo.png"), Some(&SkipReason::Binary));
+        assert_eq!(skipped.get("package-lock.json"), Some(&SkipReason::Generated));
+    }
+
+    // ---- Fase 5: policy ----
+
+    #[test]
+    fn exclude_secrets_true_and_false_semantics() {
+        let dir = std::env::temp_dir().join(format!("aicc-excl-bool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), "FAKE=1\n").unwrap();
+        std::fs::write(
+            dir.join("app.ts"),
+            "const api_key = \"aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW2xY4\";\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("plain.ts"), "export const x = 1;\n").unwrap();
+
+        let on = ScanOptions { exclude_secrets: true, ..ScanOptions::default() };
+        let report = scan(&dir, &on).expect("scan must succeed");
+        let skipped = skipped_map(&report);
+        assert_eq!(skipped.get(".env"), Some(&SkipReason::Sensitive));
+        assert_eq!(skipped.get("app.ts"), Some(&SkipReason::SecretContent));
+        assert!(included_set(&report).contains(&"plain.ts"));
+
+        let off = ScanOptions { exclude_secrets: false, ..ScanOptions::default() };
+        let report = scan(&dir, &off).expect("scan must succeed");
+        let included = included_set(&report);
+        // Opt-out admits credential content (documented reduction).
+        assert!(included.contains(&".env"), "opt-out must admit .env: {report:?}");
+        assert!(included.contains(&"app.ts"), "opt-out must admit secret content: {report:?}");
+
+        // Binary/generated/size policy still applies with opt-out.
+        std::fs::write(dir.join("bin.png"), "fake").unwrap();
+        std::fs::write(dir.join("package-lock.json"), "{}").unwrap();
+        let report = scan(&dir, &off).expect("scan must succeed");
+        assert_eq!(skipped_map(&report).get("bin.png"), Some(&SkipReason::Binary));
+        assert_eq!(skipped_map(&report).get("package-lock.json"), Some(&SkipReason::Generated));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extra_excludes_is_hard_policy() {
+        let dir = std::env::temp_dir().join(format!("aicc-extra-excl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("private")).unwrap();
+        std::fs::write(dir.join("private/data.ts"), "export const x = 1;\n").unwrap();
+        std::fs::write(dir.join("keep.ts"), "export const y = 2;\n").unwrap();
+
+        let options = ScanOptions {
+            extra_excludes: vec![String::from("**/private/**")],
+            ..ScanOptions::default()
+        };
+        let report = scan(&dir, &options).expect("scan must succeed");
+        assert_eq!(skipped_map(&report).get("private/data.ts"), Some(&SkipReason::SecurityExclude));
+        assert!(included_set(&report).contains(&"keep.ts"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extra_excludes_beats_gitignore_whitelist() {
+        let dir = std::env::temp_dir().join(format!("aicc-excl-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("locked")).unwrap();
+        std::fs::write(dir.join("locked/.gitignore"), "!keep.ts\n").unwrap();
+        std::fs::write(dir.join("locked/keep.ts"), "export const x = 1;\n").unwrap();
+
+        let options =
+            ScanOptions { extra_excludes: vec![String::from("locked/")], ..ScanOptions::default() };
+        let report = scan(&dir, &options).expect("scan must succeed");
+        assert_eq!(
+            skipped_map(&report).get("locked/keep.ts"),
+            Some(&SkipReason::SecurityExclude),
+            "hard policy must beat whitelist: {report:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extra_excludes_path_wins_without_reading_content() {
+        // Same file would be SecretContent, but hard path policy applies first.
+        let dir = std::env::temp_dir().join(format!("aicc-excl-first-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("private")).unwrap();
+        std::fs::write(
+            dir.join("private/keys.ts"),
+            "const api_key = \"aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW2xY4\";\n",
+        )
+        .unwrap();
+        let options = ScanOptions {
+            extra_excludes: vec![String::from("**/private/**")],
+            ..ScanOptions::default()
+        };
+        let report = scan(&dir, &options).expect("scan must succeed");
+        assert_eq!(skipped_map(&report).get("private/keys.ts"), Some(&SkipReason::SecurityExclude));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_extra_excludes_fails_fast() {
+        let err = scan(
+            &fixture("basic-repo"),
+            &ScanOptions {
+                extra_excludes: vec![String::from("[unclosed")],
+                ..ScanOptions::default()
+            },
+        )
+        .expect_err("invalid glob must fail");
+        assert!(matches!(err, ScanError::InvalidExcludePattern { .. }));
+
+        let err = scan(
+            &fixture("basic-repo"),
+            &ScanOptions {
+                extra_excludes: vec![String::from("!keep.ts")],
+                ..ScanOptions::default()
+            },
+        )
+        .expect_err("negation must be rejected");
+        assert!(matches!(err, ScanError::InvalidExcludePattern { .. }));
+    }
+
+    #[test]
+    fn oversized_file_is_excluded_before_full_read() {
+        let dir = std::env::temp_dir().join(format!("aicc-too-large-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 200 bytes with a secret at the end; limit 100 forces TooLarge first.
+        let mut body = "a".repeat(150);
+        body.push_str("\napi_key = \"aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW2xY4\"\n");
+        std::fs::write(dir.join("big.ts"), &body).unwrap();
+        let options = ScanOptions { max_file_bytes: 100, ..ScanOptions::default() };
+        let report = scan(&dir, &options).expect("scan must succeed");
+        assert_eq!(skipped_map(&report).get("big.ts"), Some(&SkipReason::TooLarge));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secret_canary_never_appears_in_report() {
+        let canary = "CANARY827364aB3dE5fG7hJ9kL2mN4pQ6rS8tU0";
+        let dir = std::env::temp_dir().join(format!("aicc-canary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app.ts"), format!("const api_key = \"{canary}\";\n")).unwrap();
+
+        let report = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        assert_eq!(skipped_map(&report).get("app.ts"), Some(&SkipReason::SecretContent));
+        let json = serde_json::to_string(&report).expect("report serializes");
+        assert!(!json.contains(canary), "serialized report leaked canary");
+        for w in &report.warnings {
+            assert!(!w.message.contains(canary));
+            assert!(w.rel_path.as_deref().is_none_or(|p| !p.contains(canary)));
+        }
+        for (rel, _) in &report.skipped {
+            assert!(!rel.contains(canary));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secrets_scan_is_deterministic() {
+        let first = scan_fixture("secrets-repo", &ScanOptions::default());
+        let second = scan_fixture("secrets-repo", &ScanOptions::default());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn options_come_from_full_app_config() {
+        let mut config = aicc_core::config::AppConfig::default();
+        config.index.max_file_bytes = 4321;
+        config.index.extra_ignores = vec![String::from("gen/**")];
+        config.security.exclude_secrets = false;
+        config.security.extra_excludes = vec![String::from("**/private/**")];
+        let options = ScanOptions::from_app_config(&config);
+        assert_eq!(options.max_file_bytes, 4321);
+        assert_eq!(options.extra_ignores, vec![String::from("gen/**")]);
+        assert!(!options.exclude_secrets);
+        assert_eq!(options.extra_excludes, vec![String::from("**/private/**")]);
     }
 }

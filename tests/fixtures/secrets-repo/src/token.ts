@@ -1,0 +1,2 @@
+// FAKE TOKEN FOR TESTS ONLY - NOT A REAL CREDENTIAL
+export const token = "ghp_FAKE0123456789abcdefghijTESTONLY";

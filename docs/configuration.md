@@ -44,4 +44,33 @@ default_budget = 30000
 - `default_limit` must be 1–1000; `default_budget` must be 1–1_000_000.
 - Config is declarative data only; it is never executed.
 
+## Security (Fase 5)
+
+`[security]` is wired to the scanner via `ScanOptions::from_app_config`.
+`ScanOptions::from_index_config` keeps the old index-only behavior with secure
+defaults (`exclude_secrets = true`, `extra_excludes = []`).
+
+- `exclude_secrets` (default `true`):
+  - `true`: path-based secrets (`.env`, `*.pem`, …) are excluded before any
+    content is read; remaining candidates get a single bounded read
+    (≤ `max_file_bytes`) backing the binary check and the high-confidence
+    content detector (PEM markers, selected provider tokens, DB URLs with
+    `user:password@`, credential assignments). Hits are excluded as
+    `Sensitive` (path) or `SecretContent` (content) with static reasons only.
+  - `false`: explicit opt-out. Automatic secret exclusion (path + content) is
+    disabled, so credential-bearing content may be admitted. This
+    significantly reduces protection. Binary, generated, oversized and
+    `extra_excludes` policy still apply.
+- `extra_excludes` (default `[]`): hard path policy using the same
+  gitignore-style globs as `index.extra_ignores`, e.g.
+  `["**/private/**", "**/*.local", "config/production.toml"]`.
+  - Validated at scan start; invalid patterns fail fast
+    (`InvalidExcludePattern`), never silently ignored.
+  - `!` negation patterns are rejected: a whitelist must never reopen a hard
+    exclusion.
+  - Evaluated before `.gitignore` reinclusions and without reading content;
+    reported as `SecurityExclude`, distinct from `ExtraIgnore` (soft,
+    `.gitignore`-reopenable) and from `Sensitive`/`SecretContent`.
+
 See ADR [0005](decisions/0005-config-toml.md) for the TOML rationale.
+See [privacy.md](privacy.md) for processing, opt-out and limitations.
