@@ -21,8 +21,9 @@
 //! Sensitive > TooLarge > Binary`.
 //! Symlinks are rejected before everything (`Symlink`); I/O failures are
 //! reported as warnings and the file is skipped (`Unreadable`) without
-//! aborting the scan. Directory pruning (`DefaultIgnore`, `ExtraIgnore`)
-//! happens during traversal, before file-level evaluation.
+//! aborting the scan. Only default-ignored directories (`DefaultIgnore`) are
+//! pruned during traversal; `extra_ignores` never prunes so nested
+//! `.gitignore` reinclusions keep their documented precedence.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -194,8 +195,10 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError>
 
     let extra = build_extra_matcher(&root_abs, &options.extra_ignores)?;
 
-    // Directory pruning happens inside the walker: default and extra-ignored
-    // directories are recorded once and never descended into.
+    // Directory pruning happens inside the walker: only default-ignored
+    // directories are recorded once and never descended into. `extra_ignores`
+    // must NOT prune: a pruned directory would hide nested `.gitignore`
+    // reinclusions that outrank `ExtraIgnore` by documented precedence.
     let pruned: Arc<Mutex<Vec<SkippedEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let mut builder = WalkBuilder::new(&root_abs);
     builder
@@ -207,7 +210,6 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError>
         .follow_links(false)
         .filter_entry({
             let root = root_abs.clone();
-            let extra = extra.clone();
             let pruned = Arc::clone(&pruned);
             move |entry: &DirEntry| {
                 if entry.depth() == 0 {
@@ -220,10 +222,6 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError>
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if DEFAULT_IGNORED_DIRS.contains(&name.as_str()) {
                     record_skip(&pruned, rel, SkipReason::DefaultIgnore);
-                    return false;
-                }
-                if extra.matched_path_or_any_parents(entry.path(), true).is_ignore() {
-                    record_skip(&pruned, rel, SkipReason::ExtraIgnore);
                     return false;
                 }
                 true
@@ -263,13 +261,21 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError>
         if entry.file_type().is_some_and(|t| t.is_dir()) {
             continue;
         }
-        if layers.is_ignored(entry.path(), false) {
-            skipped.push((rel, SkipReason::GitIgnore));
-            continue;
-        }
-        if layers.extra_is_ignored(entry.path(), false) {
-            skipped.push((rel, SkipReason::ExtraIgnore));
-            continue;
+        // Documented precedence: GitIgnore > ExtraIgnore. A nested `.gitignore`
+        // whitelist (`!keep.ts`) explicitly re-includes and therefore skips the
+        // `ExtraIgnore` check; absence of any git match falls through to it.
+        match layers.git_verdict(entry.path(), false) {
+            Some(GitVerdict::Ignore) => {
+                skipped.push((rel, SkipReason::GitIgnore));
+                continue;
+            }
+            Some(GitVerdict::Whitelist) => {}
+            None => {
+                if layers.extra_is_ignored(entry.path(), false) {
+                    skipped.push((rel, SkipReason::ExtraIgnore));
+                    continue;
+                }
+            }
         }
         if is_generated_file_name(entry.path()) {
             skipped.push((rel, SkipReason::Generated));
@@ -364,21 +370,32 @@ struct GitLayers {
     warnings: Vec<ScanWarning>,
 }
 
+/// Explicit `.gitignore` outcome for precedence handling.
+/// `Ignore` is an explicit exclusion, `Whitelist` an explicit `!` re-inclusion;
+/// absence of both means no `.gitignore` rule matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitVerdict {
+    Ignore,
+    Whitelist,
+}
+
 impl GitLayers {
     fn new(root: PathBuf, extra: Gitignore) -> Self {
         Self { root, extra, cache: HashMap::new(), warnings: Vec::new() }
     }
 
     /// Fold verdicts shallow-to-deep; the deepest non-trivial verdict wins.
-    fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
-        let mut verdict = false;
+    /// Returns `None` when no `.gitignore` layer matches, so callers can
+    /// distinguish exclusion, explicit re-inclusion and absence.
+    fn git_verdict(&mut self, path: &Path, is_dir: bool) -> Option<GitVerdict> {
+        let mut verdict: Option<GitVerdict> = None;
         for dir in ancestor_dirs(&self.root, path) {
             if let Some(matcher) = self.layer_for(&dir) {
                 let matched = matcher.matched_path_or_any_parents(path, is_dir);
                 if matched.is_ignore() {
-                    verdict = true;
+                    verdict = Some(GitVerdict::Ignore);
                 } else if matched.is_whitelist() {
-                    verdict = false;
+                    verdict = Some(GitVerdict::Whitelist);
                 }
             }
         }
@@ -802,6 +819,38 @@ mod tests {
         assert_eq!(
             included_set(&report).iter().filter(|path| path.ends_with("inner.txt")).count(),
             1
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nested_gitignore_whitelist_beats_extra_ignore_dir() {
+        // Regression: `extra_ignores` hits a directory, but a nested
+        // `.gitignore` explicitly re-includes `keep.ts`. Documented precedence
+        // (`GitIgnore > ExtraIgnore`) requires `keep.ts` to stay included
+        // while siblings remain `ExtraIgnore`. No directory pruning may hide
+        // the nested rules.
+        let dir = std::env::temp_dir().join(format!("aicc-extra-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("over")).unwrap();
+        std::fs::write(dir.join("over/.gitignore"), "!keep.ts\n").unwrap();
+        std::fs::write(dir.join("over/keep.ts"), "console.log(1);\n").unwrap();
+        std::fs::write(dir.join("over/drop.ts"), "console.log(2);\n").unwrap();
+
+        let options =
+            ScanOptions { extra_ignores: vec![String::from("over/")], ..ScanOptions::default() };
+        let report = scan(&dir, &options).expect("scan must succeed");
+        let included = included_set(&report);
+        let skipped = skipped_map(&report);
+        assert!(
+            included.contains(&"over/keep.ts"),
+            "nested .gitignore whitelist must beat extra_ignores: {report:?}"
+        );
+        assert_eq!(
+            skipped.get("over/drop.ts"),
+            Some(&SkipReason::ExtraIgnore),
+            "siblings without reinclusion stay excluded: {report:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -88,3 +88,48 @@ fn json_stdout_stays_pure() {
     let stdout_text = String::from_utf8_lossy(&output.stdout);
     assert!(stdout_text.trim_start().starts_with('{'));
 }
+
+#[test]
+fn unimplemented_commands_never_echo_user_input() {
+    let query_canary = "CANARY-QUERY-9f8e7d6c5b4a-human-json";
+    let task_canary = "CANARY-TASK-1a2b3c4d5e6f-human-json";
+
+    // Human format: canary must not appear on either stream.
+    for args in [vec!["search", query_canary], vec!["context", task_canary]] {
+        let output = aicc().args(&args).assert().failure().get_output().clone();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stdout.contains(query_canary) && !stdout.contains(task_canary),
+            "human stdout leaked input: {stdout}"
+        );
+        assert!(
+            !stderr.contains(query_canary) && !stderr.contains(task_canary),
+            "human stderr leaked input: {stderr}"
+        );
+        assert!(stderr.contains("not yet implemented"));
+    }
+
+    // JSON mode: canary must not appear on either stream either.
+    for args in [vec!["--json", "search", query_canary], vec!["--json", "context", task_canary]] {
+        let output = aicc().args(&args).assert().failure().get_output().clone();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stdout.contains(query_canary) && !stdout.contains(task_canary),
+            "json stdout leaked input: {stdout}"
+        );
+        assert!(
+            !stderr.contains(query_canary) && !stderr.contains(task_canary),
+            "json stderr leaked input: {stderr}"
+        );
+    }
+
+    // Exit code stays non-zero (failure) without echoing details.
+    aicc()
+        .args(["search", query_canary])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("not yet implemented"));
+}

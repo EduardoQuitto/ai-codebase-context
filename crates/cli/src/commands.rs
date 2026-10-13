@@ -45,54 +45,18 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Commands::Status(args) => cmd_status(args.path.or(global_path), as_json),
         Commands::Config(args) => cmd_config(args.path.or(global_path), as_json),
         Commands::Version => cmd_version(as_json),
-        Commands::Analyze(args) => {
-            let root = resolve_root(args.path.or(global_path))?;
-            not_yet("analyze", "Fase 6-8 (discovery + parser + graph)", &root.display().to_string())
-        }
-        Commands::Index(args) => {
-            let root = resolve_root(args.path.or(global_path))?;
-            let mode = if args.rebuild { "full rebuild" } else { "incremental" };
-            not_yet(
-                "index",
-                "Fase 10 (SQLite persistence)",
-                &format!("{}; mode={mode}", root.display()),
-            )
-        }
-        Commands::Search(args) => {
-            let root = resolve_root(args.path.or(global_path))?;
-            let limit = args.limit.unwrap_or(AppConfig::default().retrieval.default_limit);
-            let language = args.language.as_deref().unwrap_or("any");
-            not_yet(
-                "search",
-                "Fase 11 (FTS5 lexical search)",
-                &format!(
-                    "{}; query={:?}; limit={limit}; language={language}",
-                    root.display(),
-                    args.query
-                ),
-            )
-        }
-        Commands::Context(args) => {
-            let root = resolve_root(args.path.or(global_path))?;
-            let budget = args.budget.unwrap_or(AppConfig::default().context.default_budget);
-            not_yet(
-                "context",
-                "Fase 12 (context compiler)",
-                &format!("{}; task={:?}; budget={budget}", root.display(), args.task),
-            )
-        }
-        Commands::Map(args) => {
-            let root = resolve_root(args.path.or(global_path))?;
-            not_yet("map", "Fase 8 (structural map)", &root.display().to_string())
-        }
+        Commands::Analyze(_) => not_yet("analyze", "Fase 6-8 (discovery + parser + graph)"),
+        Commands::Index(_) => not_yet("index", "Fase 10 (SQLite persistence)"),
+        Commands::Search(_) => not_yet("search", "Fase 11 (FTS5 lexical search)"),
+        Commands::Context(_) => not_yet("context", "Fase 12 (context compiler)"),
+        Commands::Map(_) => not_yet("map", "Fase 8 (structural map)"),
         Commands::Mcp(args) => {
             if args.transport != "stdio" {
-                return Err(CliError::Message(format!(
-                    "unsupported MCP transport {:?} (planned: stdio only)",
-                    args.transport
+                return Err(CliError::Message(String::from(
+                    "unsupported MCP transport (planned: stdio only)",
                 )));
             }
-            not_yet("mcp", "Fase 19 (read-only STDIO server)", "transport=stdio")
+            not_yet("mcp", "Fase 19 (read-only STDIO server)")
         }
     }
 }
@@ -198,11 +162,11 @@ fn cmd_version(as_json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Honest skeleton: never fake success; echo what was received and name the
-/// owning roadmap phase.
-fn not_yet(command: &'static str, phase: &'static str, detail: &str) -> Result<(), CliError> {
+/// Honest skeleton: never fake success and never echo user input.
+/// Only the command name, its roadmap phase and the docs pointer are shown.
+fn not_yet(command: &'static str, phase: &'static str) -> Result<(), CliError> {
     Err(CliError::Message(format!(
-        "`{command}` is not yet implemented in this foundation build.\nReceived: {detail}\nPlanned: {phase}. See ROADMAP.md."
+        "`{command}` is not yet implemented in this foundation build.\nPlanned: {phase}. See ROADMAP.md."
     )))
 }
 
@@ -225,6 +189,7 @@ fn repo_id_for(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{ContextArgs, SearchArgs};
 
     #[test]
     fn repo_id_is_stable() {
@@ -232,5 +197,52 @@ mod tests {
         let b = repo_id_for(Path::new("."));
         assert_eq!(a, b);
         assert_eq!(a.len(), 16);
+    }
+
+    #[test]
+    fn not_yet_hides_user_input() {
+        let canary = "CANARY-QUERY-9f8e7d6c5b4a";
+        let err = not_yet("search", "Fase 11 (FTS5 lexical search)").unwrap_err().to_string();
+        assert!(err.contains("not yet implemented"));
+        assert!(err.contains("search"));
+        assert!(!err.contains(canary), "canary must never appear: {err}");
+        assert!(!err.contains("Received:"), "detail echo must be gone: {err}");
+    }
+
+    #[test]
+    fn search_dispatch_does_not_echo_query() {
+        let canary = "CANARY-SEARCH-0123456789abcdef";
+        let cli = Cli {
+            path: None,
+            json: false,
+            verbose: false,
+            command: Commands::Search(SearchArgs {
+                query: canary.to_string(),
+                limit: None,
+                language: None,
+                path: None,
+            }),
+        };
+        let err = dispatch(cli).unwrap_err().to_string();
+        assert!(!err.contains(canary), "query canary leaked: {err}");
+        assert!(err.contains("not yet implemented"));
+    }
+
+    #[test]
+    fn context_dispatch_does_not_echo_task() {
+        let canary = "CANARY-TASK-fedcba9876543210";
+        let cli = Cli {
+            path: None,
+            json: true,
+            verbose: false,
+            command: Commands::Context(ContextArgs {
+                task: canary.to_string(),
+                budget: None,
+                path: None,
+            }),
+        };
+        let err = dispatch(cli).unwrap_err().to_string();
+        assert!(!err.contains(canary), "task canary leaked: {err}");
+        assert!(err.contains("not yet implemented"));
     }
 }
