@@ -39,6 +39,16 @@ directories = { version = "6.0" }
 # Traversal respecting .gitignore (Fase 4, ROADMAP section 4.7)
 ignore = { version = "0.4" }
 
+# Structural parsing (Fase 7, ADR 0004): runtime + compiled-in grammars only.
+# All grammars share the tree-sitter-language 0.1 ABI; the 0.26 runtime loads
+# them without downloading anything at execution time.
+tree-sitter = { version = "0.26" }
+tree-sitter-language = { version = "0.1" }
+tree-sitter-typescript = { version = "0.23" }
+tree-sitter-javascript = { version = "0.25" }
+tree-sitter-python = { version = "0.25" }
+tree-sitter-rust = { version = "0.24" }
+
 # Deterministic content hashing for file metadata (Fase 6, BLAKE3, no service)
 blake3 = { version = "1" }
 

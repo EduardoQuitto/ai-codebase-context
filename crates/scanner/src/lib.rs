@@ -189,8 +189,10 @@ pub struct ScannedEntry {
     /// Deterministic line count over the validated bytes (see
     /// [`count_lines`]).
     pub line_count: u64,
-    /// Real structural parser availability. Always `false` in Fase 6
-    /// (Tree-sitter belongs to Fase 7); distinct from the v1 support plan.
+    /// Real structural parser availability (Fase 7: TypeScript, JavaScript,
+    /// Python and Rust; every other language reports `false`). Detection and
+    /// parsing stay separate stages: the scanner records availability, it
+    /// does not build syntax trees during traversal.
     pub parser_available: bool,
 }
 
@@ -1440,12 +1442,17 @@ mod tests {
     }
 
     #[test]
-    fn metadata_parser_unavailable_in_fase_6() {
+    fn metadata_parser_availability_matches_grammar() {
+        // Fase 7: implemented for TypeScript/JavaScript/Python/Rust only.
         let report = scan_fixture("basic-repo", &ScanOptions::default());
         assert!(!report.included.is_empty());
-        for entry in &report.included {
-            assert!(!entry.parser_available, "{} must report no parser", entry.rel_path);
-        }
+        let by_rel =
+            |rel: &str| report.included.iter().find(|e| e.rel_path == rel).expect("admitted entry");
+        assert!(by_rel("src/hello.ts").parser_available);
+        assert!(by_rel("tests/test_example.py").parser_available);
+        assert!(!by_rel("package.json").parser_available);
+        assert!(!by_rel("docs/notes.md").parser_available);
+        assert!(!by_rel("extra-me.txt").parser_available);
     }
 
     #[test]

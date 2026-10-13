@@ -70,7 +70,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for Current vs Planned.
 See [ROADMAP.md](ROADMAP.md). Milestones:
 
 - A Foundation (Fases 0–4) — done
-- B Code Intelligence Core (5–10) ← **we are here** (Fase 5 done, Fase 6 done)
+- B Code Intelligence Core (5–10) ← **we are here** (Fases 5–7 done)
+
+Detected languages cover the full extension registry; structural parsing
+(symbols, imports, exports) is available for TypeScript, JavaScript, Python
+and Rust only — every other detected language reports `parser_available`
+as false and stays eligible for metadata and future textual indexing.
 - C Retrieval Core (11–16)
 - D Agent Integration (17–20)
 - E Production Quality (21–28)

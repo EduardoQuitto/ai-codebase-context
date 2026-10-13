@@ -71,7 +71,11 @@ pub enum ChunkKind {
     Documentation,
 }
 
-/// A structural symbol (function, class, interface, …). Positions are 1-based.
+/// A structural symbol (function, class, interface, …). Positions are 1-based:
+/// `start_line` is the first line of the declaration, `end_line` the last
+/// line (inclusive). `parent` holds the parent symbol's deterministic id.
+/// `visibility` is set only where the language's own modifiers determine it
+/// (Fase 7: Rust `pub` vs private); otherwise `None` (unspecified).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Symbol {
     pub id: String,
@@ -81,6 +85,7 @@ pub struct Symbol {
     pub start_line: u32,
     pub end_line: u32,
     pub parent: Option<String>,
+    pub visibility: Option<Visibility>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,9 +97,20 @@ pub enum SymbolKind {
     Interface,
     Enum,
     Type,
+    Trait,
+    Impl,
     Constant,
     Module,
     Unknown,
+}
+
+/// Declaration visibility from the language's own modifiers. Never invented:
+/// `None` on [`Symbol::visibility`] means the phase/language does not
+/// determine it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Visibility {
+    Public,
+    Private,
 }
 
 /// A typed structural relation (Fase 8). Confidence is explicit; never invent edges.

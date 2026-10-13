@@ -4,13 +4,19 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Language detection and structural parsing abstractions (Tree-sitter future)"
+description = "Language detection and Tree-sitter structural parsing"
 
 [dependencies]
 aicc-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
+tree-sitter.workspace = true
+tree-sitter-language.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

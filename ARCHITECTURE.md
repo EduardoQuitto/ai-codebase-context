@@ -24,8 +24,9 @@ aicc-core
          ↓
 aicc-scanner (ignore-crate walker, .gitignore layers, default ignores, binary/size
  guards, secret-content policy, per-file metadata: language, hash, lines)
-aicc-parser  (static extension registry + DetectionSource; LanguageParser trait
- seam; no structural parser yet — Fase 7)
+aicc-parser  (static extension registry + DetectionSource; Tree-sitter parsing for
+ TypeScript/TSX, JavaScript/JSX, Python, Rust → symbols/imports/exports +
+ diagnostics; LanguageParser trait seam; no structural parser for other langs)
 aicc-graph   (directed multigraph, typed edges + confidence)
 aicc-index   (schema gate + path resolution; no SQLite yet)
 aicc-retrieval (Query / RetrievalResult + MatchReason contracts)
