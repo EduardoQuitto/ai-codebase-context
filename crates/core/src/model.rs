@@ -18,6 +18,14 @@ pub struct Repository {
 }
 
 /// A file or indexable object (metadata only, no content here).
+///
+/// Scan-time vs index-time roles (Fase 6): the scanner's authoritative
+/// per-file record is `aicc_scanner::ScannedEntry` (relative path, measured
+/// size, BLAKE3 hash with `blake3-v1` id, line count, language id, exclusion
+/// reason for skipped files). `IndexedFile` is the future persistent index
+/// row (Fase 10): it keeps the coarse [`FileStatus`] plus the content hash
+/// the index was built from. The two are intentionally separate lifecycles —
+/// scan output vs stored state — not duplicated sources of truth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexedFile {
     /// Path relative to repo root, always with `/` separators.

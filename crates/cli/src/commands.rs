@@ -45,7 +45,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Commands::Status(args) => cmd_status(args.path.or(global_path), as_json),
         Commands::Config(args) => cmd_config(args.path.or(global_path), as_json),
         Commands::Version => cmd_version(as_json),
-        Commands::Analyze(_) => not_yet("analyze", "Fase 6-8 (discovery + parser + graph)"),
+        Commands::Analyze(_) => not_yet("analyze", "Fase 7-8 (parser + graph)"),
         Commands::Index(_) => not_yet("index", "Fase 10 (SQLite persistence)"),
         Commands::Search(_) => not_yet("search", "Fase 11 (FTS5 lexical search)"),
         Commands::Context(_) => not_yet("context", "Fase 12 (context compiler)"),

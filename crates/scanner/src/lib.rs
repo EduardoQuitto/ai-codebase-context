@@ -1,4 +1,4 @@
-//! `aicc-scanner`: secure file discovery (Fase 5).
+//! `aicc-scanner`: secure file discovery (Fase 5-6).
 //!
 //! Traversal is built on the [`ignore`](https://docs.rs/ignore) crate:
 //!
@@ -16,12 +16,20 @@
 //! - path-based secrets (`.env`, `*.pem`…) are excluded *before* any content
 //!   is read whenever `exclude_secrets` is enabled;
 //! - remaining candidates are read once, bounded by `max_file_bytes`, and the
-//!   same buffer backs the binary (NUL) check and the high-confidence secret
-//!   detector; oversized files are never read fully;
+//!   same buffer backs the binary (NUL) check, the high-confidence secret
+//!   detector and the Fase 6 metadata (hash + line count); oversized files
+//!   are never read fully;
 //! - `security.extra_excludes` is a hard path policy evaluated before
 //!   `.gitignore` reinclusions and without reading content;
 //! - findings are static reasons only: values, spans and snippets never enter
 //!   reports, warnings, logs or serialized output.
+//!
+//! Metadata (Fase 6): admitted files carry language (extension registry),
+//! normalized extension, deterministic BLAKE3 content hash and line count,
+//! all derived from the same validated buffer — no second read, no raw
+//! content stored. Excluded files carry only their relative path and static
+//! reason: no hash, line count or measured size is invented for files that
+//! were never read. Pruned directories never yield simulated descendants.
 //!
 //! The scanner never executes repository code and never logs file contents:
 //! diagnostics carry relative paths, sizes and reasons only.
@@ -40,6 +48,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use aicc_parser::{DetectionSource, detect_language};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder};
 use serde::{Deserialize, Serialize};
@@ -47,6 +56,11 @@ use thiserror::Error;
 
 use aicc_core::config::{AppConfig, IndexConfig};
 use aicc_core::security::{Classification, classify_path, contains_secret, is_generated_file_name};
+
+/// Content-hash algorithm identifier (versioned so future indexing never
+/// depends on an implicit choice). Stored hashes look like
+/// `blake3-v1:<64 lowercase hex>`.
+pub const HASH_ALGORITHM_ID: &str = "blake3-v1";
 
 /// Default-ignored directory names (ROADMAP Fase 4; additional directories
 /// can be pruned via `extra_ignores`).
@@ -149,15 +163,35 @@ pub struct ScanReport {
     pub warnings: Vec<ScanWarning>,
 }
 
-/// A candidate file admitted by the scanner.
+/// A candidate file admitted by the scanner, enriched with Fase 6 metadata.
+///
+/// All content-derived fields (`content_hash`, `line_count`, measured
+/// `size_bytes`) describe the exact validated buffer that passed the Fase 5
+/// binary and secret checks — never a second read, never raw content.
+/// `language` is the stable [`aicc_parser::Language::id`]; `Unknown` files
+/// stay eligible for metadata and future textual indexing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScannedEntry {
     /// Path relative to the scan root, always with `/` separators.
     pub rel_path: String,
-    /// File size in bytes (from metadata).
+    /// Measured content size in bytes (length of the validated buffer).
     pub size_bytes: u64,
     /// Name-based classification at scan time.
     pub classification: Classification,
+    /// Normalized lowercase extension (`None` when absent, e.g. `Makefile`).
+    pub extension: Option<String>,
+    /// Detected language id (e.g. `rust`, `typescript`, `unknown`).
+    pub language: String,
+    /// Where the language assignment came from (Fase 6: always `extension`).
+    pub detection_source: DetectionSource,
+    /// Deterministic content hash (`blake3-v1:<hex>`) of the validated bytes.
+    pub content_hash: String,
+    /// Deterministic line count over the validated bytes (see
+    /// [`count_lines`]).
+    pub line_count: u64,
+    /// Real structural parser availability. Always `false` in Fase 6
+    /// (Tree-sitter belongs to Fase 7); distinct from the v1 support plan.
+    pub parser_available: bool,
 }
 
 /// Options for a scan (subset of `AppConfig::index` + `AppConfig::security`).
@@ -412,10 +446,20 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanReport, ScanError>
                 continue;
             }
         }
+        // Fase 6 metadata from the SAME validated buffer: no second read, no
+        // raw bytes stored. Secret-excluded files never reach this point, so
+        // no hash/line count of sensitive content enters the admitted set.
+        let language = detect_language(entry.path());
         included.push(ScannedEntry {
             rel_path: rel,
-            size_bytes: size,
+            size_bytes: bounded.len() as u64,
             classification: Classification::Allowed,
+            extension: normalized_extension(entry.path()),
+            language: language.id().to_string(),
+            detection_source: DetectionSource::Extension,
+            content_hash: content_hash_for(&bounded),
+            line_count: count_lines(&bounded),
+            parser_available: language.has_structural_parser(),
         });
     }
 
@@ -597,6 +641,37 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, std::io::Error> {
     let capped = limit.saturating_add(1);
     file.take(capped).read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+/// Normalized lowercase extension (`None` when the file has none, e.g.
+/// `Makefile` or dotfiles like `.gitignore`). Consistent with
+/// [`detect_language`]: same `Path::extension` view, lowercased once.
+#[must_use]
+pub fn normalized_extension(path: &Path) -> Option<String> {
+    path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase())
+}
+
+/// Deterministic line count over raw bytes (no UTF-8 assumption, no panic):
+/// - empty content: 0;
+/// - otherwise newlines (`\n`) plus one for a final unterminated line;
+/// - trailing `\n` adds no extra empty line;
+/// - CRLF is consistent (each `\r\n` holds one `\n`); lone `\r` is not a break.
+#[must_use]
+pub fn count_lines(bytes: &[u8]) -> u64 {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let newlines = bytes.iter().filter(|b| **b == b'\n').count() as u64;
+    if bytes.ends_with(b"\n") { newlines } else { newlines + 1 }
+}
+
+/// Deterministic content hash of the validated bytes: `blake3-v1:<hex>`.
+/// BLAKE3 is a consolidated, dependency-free hash for code content (no
+/// external service, no hand-rolled crypto); the `v1` tag keeps future
+/// indexing independent of this implicit choice.
+#[must_use]
+pub fn content_hash_for(bytes: &[u8]) -> String {
+    format!("{HASH_ALGORITHM_ID}:{}", blake3::hash(bytes).to_hex())
 }
 
 /// Documentation paths by extension, well-known filename or directory.
@@ -1251,5 +1326,251 @@ mod tests {
         assert_eq!(options.extra_ignores, vec![String::from("gen/**")]);
         assert!(!options.exclude_secrets);
         assert_eq!(options.extra_excludes, vec![String::from("**/private/**")]);
+    }
+
+    // ---- Fase 6: metadata helpers ----
+
+    #[test]
+    fn line_counts_follow_documented_rule() {
+        assert_eq!(count_lines(b""), 0);
+        assert_eq!(count_lines(b"a"), 1);
+        assert_eq!(count_lines(b"a\n"), 1);
+        assert_eq!(count_lines(b"a\nb"), 2);
+        assert_eq!(count_lines(b"a\nb\n"), 2);
+        assert_eq!(count_lines(b"a\r\nb\r\n"), 2);
+        assert_eq!(count_lines(b"a\r\nb"), 2);
+        // Non-UTF8 never panics; lone CR is not a break.
+        assert_eq!(count_lines(b"\xff\n\xfe"), 2);
+        assert_eq!(count_lines(b"a\rb"), 1);
+    }
+
+    #[test]
+    fn content_hash_is_versioned_and_deterministic() {
+        let a = content_hash_for(b"hello");
+        let b = content_hash_for(b"hello");
+        let c = content_hash_for(b"world");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(a.starts_with("blake3-v1:"), "{a}");
+        assert_eq!(a.len(), "blake3-v1:".len() + 64);
+        assert!(a["blake3-v1:".len()..].chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_eq!(HASH_ALGORITHM_ID, "blake3-v1");
+    }
+
+    #[test]
+    fn extension_normalization_is_consistent() {
+        use std::path::PathBuf;
+        assert_eq!(normalized_extension(&PathBuf::from("a.RS")), Some(String::from("rs")));
+        assert_eq!(normalized_extension(&PathBuf::from("Makefile")), None);
+        assert_eq!(normalized_extension(&PathBuf::from(".gitignore")), None);
+    }
+
+    // ---- Fase 6: metadata integration ----
+
+    fn entry_by_rel<'a>(report: &'a ScanReport, rel: &str) -> &'a ScannedEntry {
+        report.included.iter().find(|e| e.rel_path == rel).expect("admitted entry")
+    }
+
+    #[test]
+    fn metadata_extension_present_and_absent() {
+        let dir = std::env::temp_dir().join(format!("aicc-meta-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn ok() {}\n").unwrap();
+        std::fs::write(dir.join("Makefile"), "all:\n\techo hi\n").unwrap();
+
+        let report = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        assert_eq!(entry_by_rel(&report, "a.rs").extension, Some(String::from("rs")));
+        assert_eq!(entry_by_rel(&report, "Makefile").extension, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_size_matches_measured_content() {
+        let dir = std::env::temp_dir().join(format!("aicc-meta-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = "fn ok() {}\n// plain\n";
+        std::fs::write(dir.join("a.rs"), body).unwrap();
+
+        let report = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        let entry = entry_by_rel(&report, "a.rs");
+        assert_eq!(entry.size_bytes, body.len() as u64);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_language_and_source() {
+        let dir = std::env::temp_dir().join(format!("aicc-meta-lang-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn ok() {}\n").unwrap();
+        std::fs::write(dir.join("b.TS"), "export const x = 1;\n").unwrap();
+        std::fs::write(dir.join("Makefile"), "all:\n\techo hi\n").unwrap();
+
+        let report = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        let rs = entry_by_rel(&report, "a.rs");
+        assert_eq!(rs.language, "rust");
+        assert_eq!(rs.detection_source.id(), "extension");
+        let ts = entry_by_rel(&report, "b.TS");
+        assert_eq!(ts.language, "typescript");
+        let mk = entry_by_rel(&report, "Makefile");
+        assert_eq!(mk.language, "unknown");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_line_counts_cover_empty_no_trailing_lf_and_crlf() {
+        let dir = std::env::temp_dir().join(format!("aicc-meta-lines-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("empty.rs"), "").unwrap();
+        std::fs::write(dir.join("unterminated.rs"), "fn a() {}").unwrap();
+        std::fs::write(dir.join("crlf.rs"), "fn a() {}\r\nfn b() {}\r\n").unwrap();
+
+        let report = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        assert_eq!(entry_by_rel(&report, "empty.rs").line_count, 0);
+        assert_eq!(entry_by_rel(&report, "unterminated.rs").line_count, 1);
+        assert_eq!(entry_by_rel(&report, "crlf.rs").line_count, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_parser_unavailable_in_fase_6() {
+        let report = scan_fixture("basic-repo", &ScanOptions::default());
+        assert!(!report.included.is_empty());
+        for entry in &report.included {
+            assert!(!entry.parser_available, "{} must report no parser", entry.rel_path);
+        }
+    }
+
+    #[test]
+    fn metadata_admitted_state_is_coherent() {
+        let report = scan_fixture("basic-repo", &ScanOptions::default());
+        let skipped = skipped_map(&report);
+        for entry in &report.included {
+            assert!(!entry.language.is_empty(), "{}", entry.rel_path);
+            assert!(entry.content_hash.starts_with("blake3-v1:"), "{}", entry.rel_path);
+            assert!(!skipped.contains_key(entry.rel_path.as_str()));
+        }
+    }
+
+    #[test]
+    fn metadata_excluded_files_have_no_invented_content() {
+        // Secret, oversized and path-excluded files never yield admitted
+        // entries, hence no hash/line count of unread content exists.
+        let dir = std::env::temp_dir().join(format!("aicc-meta-excl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), "FAKE=1\n").unwrap();
+        std::fs::write(
+            dir.join("secret.ts"),
+            "const api_key = \"FAKEaB3dE5fG7hJ9kL2mN4pQ6TESTONLY\";\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("big.ts"), "a".repeat(200)).unwrap();
+        let options = ScanOptions { max_file_bytes: 100, ..ScanOptions::default() };
+        let report = scan(&dir, &options).expect("scan must succeed");
+        let skipped = skipped_map(&report);
+        assert_eq!(skipped.get(".env"), Some(&SkipReason::Sensitive));
+        assert_eq!(skipped.get("secret.ts"), Some(&SkipReason::SecretContent));
+        assert_eq!(skipped.get("big.ts"), Some(&SkipReason::TooLarge));
+        assert!(report.included.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_hash_of_secret_never_enters_admitted_set() {
+        let dir = std::env::temp_dir().join(format!("aicc-meta-hash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = "const api_key = \"FAKEaB3dE5fG7hJ9kL2mN4pQ6TESTONLY\";\n";
+        std::fs::write(dir.join("secret.ts"), secret).unwrap();
+        std::fs::write(dir.join("plain.ts"), "export const x = 1;\n").unwrap();
+
+        let report = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        let secret_hash = content_hash_for(secret.as_bytes());
+        assert!(!report.included.iter().any(|e| e.content_hash == secret_hash));
+        assert!(included_set(&report).contains(&"plain.ts"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_json_and_debug_hide_raw_content() {
+        let dir = std::env::temp_dir().join(format!("aicc-meta-json-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let unique = "purple-monkey-dishwasher-plain-text-line-827364";
+        std::fs::write(dir.join("note.txt"), format!("{unique}\nsecond line\n")).unwrap();
+
+        let report = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        assert!(included_set(&report).contains(&"note.txt"));
+        let json = serde_json::to_string(&report).expect("report serializes");
+        assert!(json.contains("note.txt"));
+        assert!(!json.contains(unique), "raw content leaked into JSON");
+        let debug = format!("{report:?}");
+        assert!(!debug.contains(unique), "raw content leaked into Debug");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_debug_hides_secret_canary() {
+        let canary = "CANARYMETA827364aB3dE5fG7hJ9kL2mN4pQ6rS8";
+        let dir = std::env::temp_dir().join(format!("aicc-meta-canary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app.ts"), format!("const api_key = \"{canary}\";\n")).unwrap();
+
+        let report = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        assert_eq!(skipped_map(&report).get("app.ts"), Some(&SkipReason::SecretContent));
+        let json = serde_json::to_string(&report).expect("report serializes");
+        assert!(!json.contains(canary));
+        let debug = format!("{report:?}");
+        assert!(!debug.contains(canary), "canary leaked into Debug");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_scan_is_deterministic() {
+        let dir = std::env::temp_dir().join(format!("aicc-meta-determ-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("src/b.py"), "x = 1\n").unwrap();
+
+        let first = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        let second = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        assert_eq!(first, second);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_exclude_secrets_false_keeps_opt_out() {
+        // Opt-out admits the secret file WITH content-derived metadata; the
+        // Fase 5 contract is unchanged, only explicitly disabled.
+        let dir = std::env::temp_dir().join(format!("aicc-meta-optout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = "const api_key = \"FAKEaB3dE5fG7hJ9kL2mN4pQ6TESTONLY\";\n";
+        std::fs::write(dir.join("secret.ts"), secret).unwrap();
+
+        let on = scan(&dir, &ScanOptions::default()).expect("scan must succeed");
+        assert_eq!(skipped_map(&on).get("secret.ts"), Some(&SkipReason::SecretContent));
+
+        let off = scan(&dir, &ScanOptions { exclude_secrets: false, ..ScanOptions::default() })
+            .expect("scan must succeed");
+        let entry = entry_by_rel(&off, "secret.ts");
+        assert_eq!(entry.content_hash, content_hash_for(secret.as_bytes()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

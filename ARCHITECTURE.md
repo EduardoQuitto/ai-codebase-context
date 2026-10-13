@@ -17,12 +17,15 @@ aicc-core
  ├── branding (provisional `aicc`, easily renamable)
  ├── config (`.context.toml`, version = 1, safe defaults)
  ├── discovery (walk up to .git / .context.toml / manifests)
- ├── model (Repository, IndexedFile, Chunk, Symbol, Relationship — names frozen)
- ├── security (name/extension conservative classification)
+ ├── model (Repository, IndexedFile, Chunk, Symbol, Relationship — names frozen;
+ │   scan-time file metadata lives in scanner `ScannedEntry`, index rows stay here)
+ ├── security (path gates + bounded high-confidence content detector, Fase 5)
  └── platform (user cache dir → index.sqlite3 path)
          ↓
-aicc-scanner (ignore-crate walker, .gitignore layers, default ignores, binary/size guards)
-aicc-parser  (extension registry + LanguageParser trait seam)
+aicc-scanner (ignore-crate walker, .gitignore layers, default ignores, binary/size
+ guards, secret-content policy, per-file metadata: language, hash, lines)
+aicc-parser  (static extension registry + DetectionSource; LanguageParser trait
+ seam; no structural parser yet — Fase 7)
 aicc-graph   (directed multigraph, typed edges + confidence)
 aicc-index   (schema gate + path resolution; no SQLite yet)
 aicc-retrieval (Query / RetrievalResult + MatchReason contracts)
